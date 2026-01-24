@@ -5,14 +5,15 @@ This file is separate mostly for ease of copying it to freeze the machine and
 reference kernel for testing.
 """
 
+import random
 from copy import copy
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal
-import random
 
-Engine = Literal["alu", "load", "store", "flow"]
-Instruction = dict[Engine, list[tuple]]
+Engine = Literal["alu", "valu", "load", "store", "flow", "debug"]
+Slot = tuple[Any, ...]
+Instruction = dict[Engine, list[Slot]]
 
 
 class CoreState(Enum):
@@ -38,10 +39,10 @@ class DebugInfo:
     """
 
     # Maps scratch variable addr to (name, len) pair
-    scratch_map: dict[int, (str, int)]
+    scratch_map: dict[int, tuple[str, int]]
 
 
-def cdiv(a, b):
+def cdiv(a: int, b: int):
     return (a + b - 1) // b
 
 
@@ -380,7 +381,9 @@ class Machine:
                             f"{res} != {ref} for {keys} at pc={core.pc} loc={loc}"
                         )
                 continue
-            assert len(slots) <= SLOT_LIMITS[name]
+            assert len(slots) <= SLOT_LIMITS[name], (
+                f"Too many slots for {name} engine: {len(slots)} > {SLOT_LIMITS[name]}"
+            )
             for i, slot in enumerate(slots):
                 if self.trace is not None:
                     self.trace_slot(core, slot, name, i)
@@ -474,6 +477,7 @@ def reference_kernel(t: Tree, inp: Input):
     If we reach the bottom of the tree we wrap around to the top.
     """
     for h in range(inp.rounds):
+        print(inp.values, inp.indices)
         for i in range(len(inp.indices)):
             idx = inp.indices[i]
             val = inp.values[i]
@@ -565,4 +569,72 @@ def reference_kernel2(mem: list[int], trace: dict[Any, int] = {}):
     # You can add new yields or move this around for debugging
     # as long as it's matched by pause instructions.
     # The submission tests evaluate only on final memory.
+    yield mem
+
+
+def vec_hash_traced(val: list[int], trace: dict[Any, int], round: int, batch: int):
+    fns = {
+        "+": lambda x, y: x + y,
+        "^": lambda x, y: x ^ y,
+        "<<": lambda x, y: x << y,
+        ">>": lambda x, y: x >> y,
+    }
+
+    def r(x):
+        return x % (2**32)
+
+    for i in range(8):
+        trace[(batch, round, "hash_input", i)] = val[i]
+    for hi, (op1, val1, op3, op2, val2) in enumerate(HASH_STAGES):
+        tmp1 = [r(fns[op1](val[i], val1)) for i in range(8)]
+        tmp2 = [r(fns[op2](val[i], val2)) for i in range(8)]
+        val = [r(fns[op3](tmp1[i], tmp2[i])) for i in range(8)]
+
+        for i in range(8):
+            trace[(batch, round, "hash_stage", hi, i)] = val[i]
+
+    return val
+
+
+def my_reference_kernel(mem: list[int], trace: dict[Any, int] = {}):
+    v_curr_tree_vals = [0] * 8
+    v_curr_node_vals = [0] * 8
+    v_curr_idx = [0] * 8
+
+    rounds = mem[0]
+    batch_size = mem[2]
+    forest_height = mem[3]
+    tree_values = mem[4] - 1  # So we can 1-index
+    idx_values = mem[5]
+    node_values = mem[6]
+    yield mem
+    for batch in range(0, batch_size, 8):
+        v_curr_idx = [1] * 8
+        v_curr_node_vals = [mem[node_values + i] for i in range(8)]
+
+        for round in range(rounds):
+            v_curr_tree_vals = [mem[tree_values + v_curr_idx[i]] for i in range(8)]
+            for i in range(8):
+                trace[(batch, round, "v_curr_idx", i)] = v_curr_idx[i]
+                trace[(batch, round, "v_curr_node_vals", i)] = v_curr_node_vals[i]
+                trace[(batch, round, "v_curr_tree_vals", i)] = v_curr_tree_vals[i]
+
+            v_curr_node_vals = [
+                v_curr_tree_vals[i] ^ v_curr_node_vals[i] for i in range(8)
+            ]
+            v_curr_node_vals = vec_hash_traced(v_curr_node_vals, trace, round, batch)
+
+            if (round + 1) % (forest_height + 1) == 0:
+                v_curr_idx = [1] * 8
+            else:
+                v_tmp1 = [v_curr_node_vals[i] % 2 for i in range(8)]
+                v_curr_idx = [2 * v_curr_idx[i] + v_tmp1[i] for i in range(8)]
+
+        for i in range(8):
+            trace[(batch, "final_values", i)] = v_curr_node_vals[i]
+        for i in range(8):
+            mem[idx_values + i] = v_curr_idx[i] - 1
+            mem[node_values + i] = v_curr_node_vals[i]
+        idx_values += 8
+        node_values += 8
     yield mem
