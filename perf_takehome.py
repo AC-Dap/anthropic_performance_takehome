@@ -43,6 +43,10 @@ from problem import (
 Address: TypeAlias = int
 
 
+def vec_at(base_addr: Address, idx: int) -> Address:
+    return base_addr + idx
+
+
 class KernelBuilder:
     def __init__(self):
         self.instrs: list[Instruction] = []
@@ -120,11 +124,11 @@ class KernelBuilder:
         """
 
         # Intermediate variables we'll need
-        v_curr_tree_vals = self.alloc_vec("v_curr_tree_vals")
-        v_curr_node_vals = self.alloc_vec("v_curr_node_vals")
-        v_curr_idx = self.alloc_vec("v_curr_idx")
-        v_tmp1 = self.alloc_vec("v_tmp1")
-        v_tmp2 = self.alloc_vec("v_tmp2")
+        v_curr_tree_vals = self.alloc_scratch("v_curr_tree_vals", length=n_nodes)
+        v_curr_node_vals = self.alloc_scratch("v_curr_node_vals", length=n_nodes)
+        v_curr_idx = self.alloc_scratch("v_curr_idx", length=n_nodes)
+        v_tmp1 = self.alloc_scratch("v_tmp1", length=n_nodes)
+        v_tmp2 = self.alloc_scratch("v_tmp2", length=n_nodes)
 
         # input is only 7 variables, but allocate 8 so vload doesn't stomp on 8th entry
         v_mem_input = self.alloc_vec("v_mem_input")
@@ -153,14 +157,21 @@ class KernelBuilder:
 
         self.add_single("flow", ("pause",))
         assert batch_size % 8 == 0, "Batch size not in even chunks of 8"
-        for batch in range(0, batch_size, 8):
+
+        # Initialize v_curr_idx and v_curr_node_vals
+        self.add_single(
+            "valu", ("vbroadcast", v_tmp1, mem_node_vals)
+        )  # Use as temp idx
+        for offset in range(0, batch_size, 8):
             self.bundle(
                 {
-                    "valu": [("vbroadcast", v_curr_idx, one_const)],
-                    "load": [("vload", v_curr_node_vals, mem_node_vals)],
+                    "valu": [("vbroadcast", vec_at(v_curr_idx, offset), one_const)],
+                    "load": [("vload", vec_at(v_curr_node_vals, offset), v_tmp1)],
+                    "flow": [("add_imm", v_tmp1, v_tmp1, 8)],
                 }
             )
 
+        for batch in range(0, batch_size, 8):
             for round in range(rounds):
                 is_last_layer = (round + 1) % (forest_height + 1) == 0
 
