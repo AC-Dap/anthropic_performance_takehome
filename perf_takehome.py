@@ -94,7 +94,7 @@ class KernelBuilder:
                 tree_idx = 2**level + i
                 slots.append(("==", tmp1, curr_idx, self.consts[tree_idx]))
                 slots.append(("*", tmp1, tmp1, self.v_first_tree_vals[tree_idx - 1]))
-                base = self.v_first_tree_vals[2**level - 1] if i == 0 else curr_tree_val
+                base = self.v_first_tree_vals[2**level - 1] if i == 1 else curr_tree_val
                 slots.append(("+", curr_tree_val, tmp1, base))
             return slots
 
@@ -106,7 +106,7 @@ class KernelBuilder:
             for i in range(1, 2**level):
                 tree_idx = 2**level + i
                 slots.append(("==", tmp1, curr_idx, self.consts[tree_idx]))
-                base = self.v_first_tree_vals[2**level - 1] if i == 0 else curr_tree_val
+                base = self.v_first_tree_vals[2**level - 1] if i == 1 else curr_tree_val
                 slots.append(("multiply_add", curr_tree_val, tmp1, self.v_first_tree_vals[tree_idx - 1], base))
             return slots
 
@@ -143,10 +143,10 @@ class KernelBuilder:
                 self.add("valu", [slot[1] for slot in valu_slots])
         elif level == 2:
             valu_slots = [build_valu_step(start + i, i) for i in range(0, n_valu * VLEN, VLEN)]
-            alu1_slots, alu2_slots, load1_slots, load2_slots = build_load_step(
-                start + n_valu * VLEN, n_valu * VLEN, n_alu
-            )
             if n_alu > 0:
+                alu1_slots, alu2_slots, load1_slots, load2_slots = build_load_step(
+                    start + n_valu * VLEN, n_valu * VLEN, n_alu
+                )
                 self.bundle({"valu": [slot[0] for slot in valu_slots], "alu": [alu1_slots[0], alu2_slots[0]]})
                 for i in range(1, len(valu_slots)):
                     self.bundle(
@@ -158,16 +158,16 @@ class KernelBuilder:
                     )
                 self.add("load", [load1_slots[-1], load2_slots[-1]])
             else:
-                for i in range(len(valu_slots)):
+                for i in range(len(valu_slots[0])):
                     self.add("valu", [slot[i] for slot in valu_slots])
         elif level == 3 or level == 4:
             valu_slots = [build_valu_step(start + i, i) for i in range(0, n_valu * VLEN, VLEN)]
-            alu1_slots, alu2_slots, load1_slots, load2_slots = build_load_step(
-                start + n_valu * VLEN, n_valu * VLEN, n_alu
-            )
             if n_alu > 0:
+                alu1_slots, alu2_slots, load1_slots, load2_slots = build_load_step(
+                    start + n_valu * VLEN, n_valu * VLEN, n_alu
+                )
                 self.bundle({"valu": [slot[0] for slot in valu_slots], "alu": [alu1_slots[0], alu2_slots[0]]})
-                for i in range(1, len(valu_slots)):
+                for i in range(1, len(valu_slots[0])):
                     bundle: Instruction = {"valu": [slot[i] for slot in valu_slots]}
                     if i < len(alu1_slots):
                         bundle["alu"] = [alu1_slots[i], alu2_slots[i]]
@@ -175,7 +175,7 @@ class KernelBuilder:
                         bundle["load"] = [load1_slots[i - 1], load2_slots[i - 1]]
                     self.bundle(bundle)
             else:
-                for i in range(len(valu_slots)):
+                for i in range(len(valu_slots[0])):
                     self.add("valu", [slot[i] for slot in valu_slots])
         else:
             alu1_slots, alu2_slots, load1_slots, load2_slots = build_load_step(start, 0, end - start)
@@ -253,16 +253,21 @@ class KernelBuilder:
 
         self.v_first_tree_vals = [self.scratch_vec(f"v_first_tree_vals_{i + 1}") for i in range(32)]
 
-        self.consts = [self.scratch("const_0")] + [self.scratch_vec(f"v_const_{i + 1}") for i in range(32)]
+        self.consts = [self.scratch("const_0")] + [self.scratch_vec(f"v_const_{i}") for i in range(1, 32)]
 
         self.hash_a = [self.scratch_vec(f"v_hash_a_{i}") for i in range(len(HASH_STAGES))]
         self.hash_b = [self.scratch_vec(f"v_hash_b_{i}") for i in range(len(HASH_STAGES))]
 
         # Initialize consts
-        self.add_single("load", ("const", self.consts[0], 0))
-        for i in range(1, 33, 2):
+        self.add("load", [("const", self.consts[0], 0), ("const", self.consts[1], 1)])
+        for i in range(2, 32, 2):
             if i == 1:
-                self.add("load", [("const", self.consts[i], i), ("const", self.consts[i + 1], i + 1)])
+                self.bundle(
+                    {
+                        "valu": [("vbroadcast", self.consts[1], self.consts[1])],
+                        "load": [("const", self.consts[i], i), ("const", self.consts[i + 1], i + 1)],
+                    }
+                )
             else:
                 self.bundle(
                     {
@@ -274,8 +279,12 @@ class KernelBuilder:
                     }
                 )
         self.add(
-            "valu", [("vbroadcast", self.consts[31], self.consts[31]), ("vbroadcast", self.consts[32], self.consts[32])]
+            "valu", [("vbroadcast", self.consts[30], self.consts[30]), ("vbroadcast", self.consts[31], self.consts[31])]
         )
+
+        self.add_single("debug", ("compare", self.consts[0], ("consts", 0)))
+        for i in range(1, len(self.consts)):
+            self.add_single("debug", ("vcompare", self.consts[i], [("consts", i, j) for j in range(8)]))
 
         # Initialize hash constants
         for i, (_, a, _, _, b) in enumerate(HASH_STAGES):
@@ -294,6 +303,13 @@ class KernelBuilder:
         self.add(
             "valu", [("vbroadcast", self.hash_a[-1], self.hash_a[-1]), ("vbroadcast", self.hash_b[-1], self.hash_b[-1])]
         )
+
+        for i in range(len(HASH_STAGES)):
+            self.add_single("debug", ("vcompare", self.hash_a[i], [("hash_a", i, j) for j in range(8)]))
+            self.add_single("debug", ("vcompare", self.hash_b[i], [("hash_b", i, j) for j in range(8)]))
+
+        # Load mem input
+        self.add_single("load", ("vload", self.v_mem_input, self.consts[0]))
 
         # Initialize first_tree_vals
         # We load scalar values into tmp2, then broadcast each into the vectors
@@ -321,9 +337,15 @@ class KernelBuilder:
             self.add(
                 "valu",
                 [
-                    ("vbroadcast", self.v_first_tree_vals[i], vec_at(self.v_tmp2, i))
+                    ("vbroadcast", self.v_first_tree_vals[offset + i], vec_at(self.v_tmp2, offset + i))
                     for i in range(min(32 - offset, SLOT_LIMITS["valu"]))
                 ],
+            )
+
+        for i in range(len(self.v_first_tree_vals)):
+            self.add_single("debug", ("compare", vec_at(self.v_tmp2, i), ("first_tree_vals", i)))
+            self.add_single(
+                "debug", ("vcompare", self.v_first_tree_vals[i], [("first_tree_vals", i, j) for j in range(8)])
             )
 
         # Store difference between node + first node in each layer
@@ -347,6 +369,11 @@ class KernelBuilder:
         self.add("valu", slots[12:18])
         self.add("valu", slots[18:24])
         self.add("valu", slots[24:])
+
+        for i in range(len(self.v_first_tree_vals)):
+            self.add_single(
+                "debug", ("vcompare", self.v_first_tree_vals[i], [("first_tree_vals_diffs", i, j) for j in range(8)])
+            )
 
         # Initialize v_curr_node_vals
         self.add(
@@ -384,6 +411,10 @@ class KernelBuilder:
                 # Load current tree values
                 self.build_load_tree_vals(level, start, end)
 
+                for i in range(start, end):
+                    curr_tree_val = self.v_first_tree_vals[0] if level == 0 else vec_at(self.v_curr_tree_vals, i)
+                    self.add_single("debug", ("compare", curr_tree_val, (round, "tree_vals", i)))
+
                 # Assemble hashing steps in parallel
                 # Greedily take valu first
                 idx = start
@@ -412,6 +443,12 @@ class KernelBuilder:
                 # ALU is sometimes one instruction longer
                 if len(alu_slots) > 0 and len(alu_slots[0]) > len(valu_slots[0]):
                     self.add("alu", [alu_slot[-1] for alu_slot in alu_slots])
+
+            # Debug check curr node values
+            for i in range(batch_size):
+                self.add_single("debug", ("compare", vec_at(self.v_curr_node_vals, i), (round, "node_val", i)))
+                if round != forest_height:
+                    self.add_single("debug", ("compare", vec_at(self.v_curr_idx, i), (round, "node_idx", i)))
 
         # Write out v_curr_node_vals
         self.add(

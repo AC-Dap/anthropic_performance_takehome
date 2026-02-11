@@ -1,6 +1,6 @@
 # Anthropic's Original Performance Take-Home
 
-*Personal score: 10298. ~4 hours, no AI tools were used.*
+*Personal score: 3132. Many days on and off, no AI tools were used.*
 
 This repo contains a version of Anthropic's original performance take-home, before Claude Opus 4.5 started doing better than humans given only 2 hours.
 

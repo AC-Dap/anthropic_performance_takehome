@@ -105,9 +105,7 @@ class Machine:
         trace: bool = False,
         value_trace: dict[Any, int] = {},
     ):
-        self.cores = [
-            Core(id=i, scratch=[0] * scratch_size, trace_buf=[]) for i in range(n_cores)
-        ]
+        self.cores = [Core(id=i, scratch=[0] * scratch_size, trace_buf=[]) for i in range(n_cores)]
         self.mem = copy(mem_dump)
         self.program = program
         self.debug_info = debug_info
@@ -145,9 +143,7 @@ class Machine:
         return res
 
     def rewrite_slot(self, slot):
-        return tuple(
-            self.debug_info.scratch_map.get(s, (None, None))[0] or s for s in slot
-        )
+        return tuple(self.debug_info.scratch_map.get(s, (None, None))[0] or s for s in slot)
 
     def setup_trace(self):
         """
@@ -274,9 +270,7 @@ class Machine:
                 self.scratch_write[dest] = self.mem[core.scratch[addr]]
             case ("load_offset", dest, addr, offset):
                 # Handy for treating vector dest and addr as a full block in the mini-compiler if you want
-                self.scratch_write[dest + offset] = self.mem[
-                    core.scratch[addr + offset]
-                ]
+                self.scratch_write[dest + offset] = self.mem[core.scratch[addr + offset]]
             case ("vload", dest, addr):  # addr is a scalar
                 addr = core.scratch[addr]
                 for vi in range(VLEN):
@@ -301,17 +295,13 @@ class Machine:
     def flow(self, core, *slot):
         match slot:
             case ("select", dest, cond, a, b):
-                self.scratch_write[dest] = (
-                    core.scratch[a] if core.scratch[cond] != 0 else core.scratch[b]
-                )
+                self.scratch_write[dest] = core.scratch[a] if core.scratch[cond] != 0 else core.scratch[b]
             case ("add_imm", dest, a, imm):
                 self.scratch_write[dest] = (core.scratch[a] + imm) % (2**32)
             case ("vselect", dest, cond, a, b):
                 for vi in range(VLEN):
                     self.scratch_write[dest + vi] = (
-                        core.scratch[a + vi]
-                        if core.scratch[cond + vi] != 0
-                        else core.scratch[b + vi]
+                        core.scratch[a + vi] if core.scratch[cond + vi] != 0 else core.scratch[b + vi]
                     )
             case ("halt",):
                 core.state = CoreState.STOPPED
@@ -377,9 +367,7 @@ class Machine:
                         loc, keys = slot[1], slot[2]
                         ref = [self.value_trace[key] for key in keys]
                         res = core.scratch[loc : loc + VLEN]
-                        assert res == ref, (
-                            f"{res} != {ref} for {keys} at pc={core.pc} loc={loc}"
-                        )
+                        assert res == ref, f"{res} != {ref} for {keys} at pc={core.pc} loc={loc}"
                 continue
             assert len(slots) <= SLOT_LIMITS[name], (
                 f"Too many slots for {name} engine: {len(slots)} > {SLOT_LIMITS[name]}"
@@ -494,9 +482,7 @@ def build_mem_image(t: Tree, inp: Input) -> list[int]:
     """
     header = 7
     extra_room = len(t.values) + len(inp.indices) * 2 + VLEN * 2 + 32
-    mem = [0] * (
-        header + len(t.values) + len(inp.indices) + len(inp.values) + extra_room
-    )
+    mem = [0] * (header + len(t.values) + len(inp.indices) + len(inp.values) + extra_room)
     forest_values_p = header
     inp_indices_p = forest_values_p + len(t.values)
     inp_values_p = inp_indices_p + len(inp.values)
@@ -572,69 +558,89 @@ def reference_kernel2(mem: list[int], trace: dict[Any, int] = {}):
     yield mem
 
 
-def vec_hash_traced(val: list[int], trace: dict[Any, int], round: int, batch: int):
-    fns = {
-        "+": lambda x, y: x + y,
-        "^": lambda x, y: x ^ y,
-        "<<": lambda x, y: x << y,
-        ">>": lambda x, y: x >> y,
-    }
-
-    def r(x):
-        return x % (2**32)
-
-    for i in range(8):
-        trace[(batch, round, "hash_input", i)] = val[i]
-    for hi, (op1, val1, op3, op2, val2) in enumerate(HASH_STAGES):
-        tmp1 = [r(fns[op1](val[i], val1)) for i in range(8)]
-        tmp2 = [r(fns[op2](val[i], val2)) for i in range(8)]
-        val = [r(fns[op3](tmp1[i], tmp2[i])) for i in range(8)]
-
-        for i in range(8):
-            trace[(batch, round, "hash_stage", hi, i)] = val[i]
-
-    return val
+def r(x):
+    return x % (2**32)
 
 
 def my_reference_kernel(mem: list[int], trace: dict[Any, int] = {}):
-    v_curr_tree_vals = [0] * 8
-    v_curr_node_vals = [0] * 8
-    v_curr_idx = [0] * 8
-
     rounds = mem[0]
     batch_size = mem[2]
     forest_height = mem[3]
-    tree_values = mem[4] - 1  # So we can 1-index
-    idx_values = mem[5]
-    node_values = mem[6]
+    # Offsets into the memory which indices get added to
+    forest_values_p = mem[4] - 1  # For 1-indexing
+    inp_indices_p = mem[5]
+    inp_values_p = mem[6]
+
+    v_curr_tree_vals = [0] * batch_size
+    v_curr_node_vals = [0] * batch_size
+    v_curr_idx = [1] * batch_size
+
+    v_tmp1 = [0] * batch_size
+    v_tmp2 = [0] * batch_size
+
+    # Initialize node vals
+    v_curr_node_vals = [mem[inp_values_p + i] for i in range(batch_size)]
+
+    # Assert helper variables
+    trace[("consts", 0)] = 0
+    for i in range(1, 33):
+        for j in range(8):
+            trace[("consts", i, j)] = i
+
+    for i, (_, a, _, _, b) in enumerate(HASH_STAGES):
+        for j in range(8):
+            trace[("hash_a", i, j)] = a
+            trace[("hash_b", i, j)] = b
+
+    for i in range(32):
+        trace[("first_tree_vals", i)] = mem[forest_values_p + 1 + i]
+        for j in range(8):
+            trace[("first_tree_vals", i, j)] = mem[forest_values_p + 1 + i]
+            trace[("first_tree_vals_diffs", i, j)] = (
+                mem[forest_values_p + 1 + i]
+                if i in {0, 1, 3, 7, 15}
+                else r(mem[forest_values_p + 1 + i] - mem[forest_values_p + (1 << (i.bit_length() - 1))])
+            )
+
     yield mem
-    for batch in range(0, batch_size, 8):
-        v_curr_idx = [1] * 8
-        v_curr_node_vals = [mem[node_values + i] for i in range(8)]
+    for round in range(rounds):
+        level = round % (forest_height + 1)
 
-        for round in range(rounds):
-            v_curr_tree_vals = [mem[tree_values + v_curr_idx[i]] for i in range(8)]
-            for i in range(8):
-                trace[(batch, round, "v_curr_idx", i)] = v_curr_idx[i]
-                trace[(batch, round, "v_curr_node_vals", i)] = v_curr_node_vals[i]
-                trace[(batch, round, "v_curr_tree_vals", i)] = v_curr_tree_vals[i]
+        # Load all tree vals
+        v_curr_tree_vals = [mem[forest_values_p + v_curr_idx[i]] for i in range(batch_size)]
 
-            v_curr_node_vals = [
-                v_curr_tree_vals[i] ^ v_curr_node_vals[i] for i in range(8)
-            ]
-            v_curr_node_vals = vec_hash_traced(v_curr_node_vals, trace, round, batch)
+        for i in range(batch_size):
+            trace[(round, "tree_vals", i)] = v_curr_tree_vals[i]
 
-            if (round + 1) % (forest_height + 1) == 0:
-                v_curr_idx = [1] * 8
-            else:
-                v_tmp1 = [v_curr_node_vals[i] % 2 for i in range(8)]
-                v_curr_idx = [2 * v_curr_idx[i] + v_tmp1[i] for i in range(8)]
+        # Do hash
+        fns = {
+            "+": lambda x, y: x + y,
+            "^": lambda x, y: x ^ y,
+            "<<": lambda x, y: x << y,
+            ">>": lambda x, y: x >> y,
+        }
 
-        for i in range(8):
-            trace[(batch, "final_values", i)] = v_curr_node_vals[i]
-        for i in range(8):
-            mem[idx_values + i] = v_curr_idx[i] - 1
-            mem[node_values + i] = v_curr_node_vals[i]
-        idx_values += 8
-        node_values += 8
+        v_curr_node_vals = [v_curr_node_vals[i] ^ v_curr_tree_vals[i] for i in range(batch_size)]
+        for hi, (op1, val1, op2, op3, val3) in enumerate(HASH_STAGES):
+            for i in range(batch_size):
+                v_tmp1[i] = r(fns[op1](v_curr_node_vals[i], val1))
+                v_tmp2[i] = r(fns[op3](v_curr_node_vals[i], val3))
+                v_curr_node_vals[i] = r(fns[op2](v_tmp1[i], v_tmp2[i]))
+
+        is_last_layer = level == forest_height
+        if is_last_layer:
+            v_curr_idx = [1] * batch_size
+        else:
+            v_tmp1 = [v_curr_node_vals[i] % 2 for i in range(batch_size)]
+            v_curr_idx = [2 * v_curr_idx[i] + v_tmp1[i] for i in range(batch_size)]
+
+        for i in range(batch_size):
+            trace[(round, "node_val", i)] = v_curr_node_vals[i]
+            trace[(round, "node_idx", i)] = v_curr_idx[i]
+
+    # Write output to memory
+    for i in range(batch_size):
+        mem[inp_indices_p + i] = v_curr_idx[i] - 1
+        mem[inp_values_p + i] = v_curr_node_vals[i]
+
     yield mem
