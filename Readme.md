@@ -1,6 +1,6 @@
 # Anthropic's Original Performance Take-Home
 
-*My current personal best is in the `simd_only` branch*.
+*My current personal best is in the `simple_parallel` branch*.
 
 This repo contains a version of Anthropic's original performance take-home, before Claude Opus 4.5 started doing better than humans given only 2 hours.
 
